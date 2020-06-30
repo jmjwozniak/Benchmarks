@@ -502,6 +502,10 @@ def run(params):
         df_pred_list.append(df_val)
 
         candle.plot_metrics(history, title=None, skip_ep=0, outdir='./save/', add_lr=True)
+        train_gen.close()
+        test_gen.close()
+        val_gen.close()
+        # End of cross-validation loop.
 
     pred_fname = prefix + '.predicted.tsv'
     df_pred = pd.concat(df_pred_list)
