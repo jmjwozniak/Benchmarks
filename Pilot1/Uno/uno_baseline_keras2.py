@@ -127,7 +127,7 @@ def evaluate_prediction(y_true, y_pred):
 def log_evaluation(metric_outputs, description='Comparing y_true and y_pred:'):
     logger.info(description)
     for metric, value in metric_outputs.items():
-        logger.info('  {}: {:.4f}'.format(metric, value))
+        logger.info('  {}: {:.6f}'.format(metric, value))
 
 
 class LoggingCallback(Callback):
