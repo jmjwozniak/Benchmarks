@@ -4,7 +4,10 @@ from __future__ import division, print_function
 
 import logging
 import os
+import os.path
+from os import path
 import random
+import time
 
 import numpy as np
 import pandas as pd
@@ -49,8 +52,12 @@ def verify_path(path):
 
 def set_up_logger(logfile, verbose):
     verify_path(logfile)
+    if os.path.exists(logfile):
+        with open(logfile, "a") as fp:
+            fp.write("\n\n")
     fh = logging.FileHandler(logfile)
-    fh.setFormatter(logging.Formatter("[%(asctime)s %(process)d] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    fh.setFormatter(logging.Formatter("%(asctime)s %(message)s",
+                                      datefmt="%Y-%m-%d %H:%M:%S"))
     fh.setLevel(logging.DEBUG)
 
     sh = logging.StreamHandler()
