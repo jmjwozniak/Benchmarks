@@ -278,6 +278,26 @@ class Struct:
         self.__dict__.update(entries)
 
 
+def get_last_epoch(log):
+    """ Return the last completed epoch in the log as an integer """
+    import re
+    last_epoch = -1
+    logger.info("get_last_epoch(): open: " + log)
+    pattern = re.compile(".* \[Epoch: ([0-9].*)\] loss:")
+    with open(log) as fp:
+        for line in fp.readlines():
+            m = re.match(pattern, line)
+            if m != None:
+                logger.info("get_last_epoch(): line: " + line)
+                # print(line)
+                s = m.group(1) # the Epoch integer as a  string
+                e = int(s)     # the Epoch integer as an int
+                if e > last_epoch:
+                    last_epoch = e
+    logger.info("get_last_epoch(): result: %i", last_epoch)
+    return last_epoch
+
+
 def run(params):
     logger.info('UNO RUN() ...\n')
     args = Struct(**params)
@@ -289,6 +309,11 @@ def run(params):
     set_up_logger(logfile, args.verbose)
     logger.info('UNO START\n')
     logger.info('Params: {}'.format(params))
+
+    initial_epoch = get_last_epoch(logfile) + 1 # start at next epoch
+    logger.info('initial_epoch: ' + str(initial_epoch))
+    if initial_epoch >= int(args.epochs):
+        logger.warning("EPOCHS COMPLETED IN LOG!")
 
     if (len(args.gpus) > 0):
         logger.info('UNO: import tensorflow')
@@ -411,7 +436,16 @@ def run(params):
             cv_ext = '.cv{}'.format(fold + 1)
 
         template_model = build_model(loader, args, silent=True)
-        if args.initial_weights:
+        checkpoint_file = 'save/model-ckpt.h5'
+        logger.info("Checkpoint file: " + checkpoint_file)
+        if path.isfile(checkpoint_file):
+            logger.info("Loading from checkpoint_file ...")
+            start = time.time()
+            template_model.load_weights(checkpoint_file)
+            stop = time.time()
+            duration = stop - start
+            logger.info("Loaded from checkpoint_file in %0.3f seconds." % duration)
+        elif args.initial_weights:
             logger.info("Loading initial weights from {}".format(args.initial_weights))
             template_model.load_weights(args.initial_weights)
 
@@ -488,6 +522,7 @@ def run(params):
             logger.info('Steps per epoch: train = %d, val = %d, test = %d', train_gen.steps, val_gen.steps, test_gen.steps)
             history = model.fit_generator(train_gen, train_gen.steps,
                                           epochs=args.epochs,
+                                          initial_epoch=initial_epoch,
                                           callbacks=callbacks,
                                           validation_data=val_gen,
                                           validation_steps=val_gen.steps)
