@@ -36,14 +36,26 @@ from attn_baseline_keras2 import build_attention_model
 np.set_printoptions(precision=4)
 
 additional_definitions = [
-    {'name': 'target_abs_acc',
+    {'name': 'alpha_scale_factor',
+     'type': float,
+     'default': 0.8,
+     'help': 'factor to increase or decrease weight for abstention term in cost function'},
+    {'name': 'min_abs_acc',
      'type': float,
      'default': 0.7,
-     'help': 'target abstention accuracy'},
-    {'name': 'abs_scale_factor',
-     'type': float,
-     'default': 0.9,
-     'help': 'factor to increase or decrease weight for abstention term in cost function'}
+     'help': 'min target abstention accuracy'},
+    {'name': 'max_abs_frac',
+      'type': float,
+      'default': 0.7,
+      'help': 'max target abstention fraction'},
+    {'name': 'acc_gain',
+      'type': float,
+      'default': 5.0,
+      'help': 'factor to weight accuracy when determining new alpha scale'},
+    {'name': 'abs_gain',
+      'type': float,
+      'default': 1.0,
+      'help': 'factor to weight abstention fraction when determining new alpha scale'},
 ]
 
 required = [
@@ -58,7 +70,8 @@ required = [
     'rng_seed',
     'val_split',
     'timeout',
-    'target_abs_acc'
+    'min_abs_acc',
+    'max_abs_frac'
 ]
 
 
@@ -223,10 +236,10 @@ def run(params):
     # Convert classes to categorical with an extra slot for the abstaining class
     Y_train, Y_test, Y_val = candle.modify_labels(nb_classes + 1, Y_train, Y_test, Y_val)
 
-    # Disable class weight (for initial testing of the abstention classifier)
-    # y_integers = np.argmax(Y_train, axis=1)
-    # class_weights = compute_class_weight('balanced', np.unique(y_integers), y_integers)
-    # d_class_weights = dict(enumerate(class_weights))
+    # Try class weight and abstention classifier
+    y_integers = np.argmax(Y_train, axis=1)
+    class_weights = compute_class_weight('balanced', np.unique(y_integers), y_integers)
+    d_class_weights = dict(enumerate(class_weights))
 
     print('X_train shape:', X_train.shape)
     print('X_test shape:', X_test.shape)
@@ -243,8 +256,12 @@ def run(params):
     # Configure abstention model
     mask = np.zeros(nb_classes + 1)
     mask[-1] = 1
-    mu0 = 0.5  # In the long term this is not as important since mu auto tunes, however it may require a large number of epochs to converge if set far away from target
-    abstention_cbk = candle.AbstentionAdapt_Callback(monitor='val_abs_acc_class1', abs_monitor='val_abstention', mu0=mu0, scale_factor=params['abs_scale_factor'], target_acc=params['target_abs_acc'])
+    alpha0 = 0.5  # In the long term this is not as important since alpha auto tunes, however it may require a large number of epochs to converge if set far away from target
+    abstention_cbk = candle.AbstentionAdapt_Callback(acc_monitor='val_abstention_acc', abs_monitor='val_abstention', alpha0=alpha0, alpha_scale_factor=params['alpha_scale_factor'], min_abs_acc=params['min_abs_acc'],
+        max_abs_frac=params['max_abs_frac'],
+        acc_gain=params['acc_gain'],
+        abs_gain=params['abs_gain'],
+    )
 
     # parallel_model = multi_gpu_model(model, gpus=4)
     # parallel_model.compile(loss='mean_squared_error',
@@ -258,7 +275,7 @@ def run(params):
 
     # compile model with abstention loss
     model.compile(
-        loss=candle.abstention_loss(abstention_cbk.mu, mask),
+        loss=candle.abstention_loss(abstention_cbk.alpha, mask),
         optimizer=optimizer,
         metrics=['acc', tf_auc, candle.abstention_acc_metric(nb_classes), candle.acc_class_i_metric(1), candle.abstention_acc_class_i_metric(nb_classes, 1),
                  candle.abstention_metric(nb_classes)])
@@ -292,7 +309,7 @@ def run(params):
 
     epochs = params['epochs']
     batch_size = params['batch_size']
-    history = model.fit(X_train, Y_train,  # class_weight=d_class_weights,
+    history = model.fit(X_train, Y_train,  class_weight=d_class_weights,
                         batch_size=batch_size,
                         epochs=epochs,
                         verbose=1,
@@ -306,21 +323,36 @@ def run(params):
         candle.plot_history(params['save_path'] + root_fname, history, 'acc')
     if 'abstention_acc' in history.history.keys():
         candle.plot_history(params['save_path'] + root_fname, history, 'abstention_acc')
-    # Plot mu evolution
-    fname = params['save_path'] + root_fname + '.mu.png'
+    # Plot alpha evolution
+    fname = params['save_path'] + root_fname + '.alpha.png'
     xlabel = 'Epochs'
-    ylabel = 'Abstention Weight mu'
-    title = 'mu Evolution'
-    candle.plot_array(abstention_cbk.muvalues, xlabel, ylabel, title, fname)
+    ylabel = 'Abstention Weight alpha'
+    title = 'alpha Evolution'
+    candle.plot_array(abstention_cbk.alphavalues, xlabel, ylabel, title, fname)
 
     # Evaluate model
     score = model.evaluate(X_test, Y_test, verbose=0)
     Y_predict = model.predict(X_test)
     evaluate_abstention(params, root_fname, nb_classes, Y_test, _Y_test, Y_predict, pos, total, score)
 
-    save_and_test_saved_model(params, model, root_fname, nb_classes, abstention_cbk.mu, mask, X_train, X_test, Y_test)
+    save_and_test_saved_model(params, model, root_fname, nb_classes, abstention_cbk.alpha, mask, X_train, X_test, Y_test)
 
     attn.logger.handlers = []
+    df_testX = pd.DataFrame(X_test)
+    #print('df_testX.shape: ', df_testX.shape)
+    cols = ['Y_test' + str(i) for i in range(Y_test.shape[1])]
+    df_testY = pd.DataFrame(Y_test, columns=cols)
+    #print('df_testY.shape: ', df_testY.shape)
+    df_test = pd.concat([df_testY, df_testX], axis=1)
+    #print('df_test.shape: ', df_test.shape)
+    cols = ['Y_pred' + str(i) for i in range(Y_predict.shape[1])]
+    df_pred = pd.DataFrame(Y_predict, columns=cols)
+    #print('df_pred.shape: ', df_pred.shape)
+    df_test = pd.concat([df_pred, df_test], axis=1).reset_index(drop=True)
+    #print('df_test.shape: ', df_test.shape)
+    fname = params['save_path'] + root_fname + '.dftest.tsv'
+    df_test.to_csv(fname, sep='\t', index=False, float_format="%.3g")
+
 
     return history
 
@@ -423,7 +455,7 @@ def evaluate_abstention(params, root_fname, nb_classes, Y_test, _Y_test, Y_predi
     print('Test accuracy (not abstained samples):', score[1])
 
 
-def save_and_test_saved_model(params, model, root_fname, nb_classes, mu, mask, X_train, X_test, Y_test):
+def save_and_test_saved_model(params, model, root_fname, nb_classes, alpha, mask, X_train, X_test, Y_test):
 
     # serialize model to JSON
     model_json = model.to_json()
@@ -460,7 +492,7 @@ def save_and_test_saved_model(params, model, root_fname, nb_classes, mu, mask, X
     # print("Loaded json model from disk")
 
     # evaluate json loaded model on test data
-    loaded_model_json.compile(loss=candle.abstention_loss(mu, mask), optimizer='SGD', metrics=[candle.abstention_acc_metric(nb_classes)])
+    loaded_model_json.compile(loss=candle.abstention_loss(alpha, mask), optimizer='SGD', metrics=[candle.abstention_acc_metric(nb_classes)])
     score_json = loaded_model_json.evaluate(X_test, Y_test, verbose=0)
     print('json Validation abstention loss:', score_json[0])
     print('json Validation abstention accuracy:', score_json[1])
@@ -470,7 +502,7 @@ def save_and_test_saved_model(params, model, root_fname, nb_classes, mu, mask, X
     loaded_model_yaml.load_weights(params['save_path'] + root_fname + '.model.h5')
     print("Loaded yaml model from disk")
     # evaluate yaml loaded model on test data
-    loaded_model_yaml.compile(loss=candle.abstention_loss(mu, mask), optimizer='SGD', metrics=[candle.abstention_acc_metric(nb_classes)])
+    loaded_model_yaml.compile(loss=candle.abstention_loss(alpha, mask), optimizer='SGD', metrics=[candle.abstention_acc_metric(nb_classes)])
     score_yaml = loaded_model_yaml.evaluate(X_test, Y_test, verbose=0)
     print('yaml Validation abstention loss:', score_yaml[0])
     print('yaml Validation abstention accuracy:', score_yaml[1])

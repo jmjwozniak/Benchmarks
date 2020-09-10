@@ -212,6 +212,7 @@ def run(params):
 
     # Construct extension to save model
     ext = adrp.extension_from_parameters(params, ".keras")
+    params['save_path'] = './'+params['base_name']+'/'
     candle.verify_path(params["save_path"])
     prefix = "{}{}".format(params["save_path"], ext)
     logfile = params["logfile"] if params["logfile"] else prefix + ".log"
@@ -327,7 +328,8 @@ def run(params):
     # history = parallel_model.fit(X_train, Y_train,
     epochs = params["epochs"]
     batch_size = params["batch_size"]
-
+    timeout_monitor = candle.TerminateOnTimeOut(params['timeout'])
+    
     history = model.fit(
         X_train,
         Y_train,
@@ -335,7 +337,7 @@ def run(params):
         epochs=epochs,
         verbose=1,
         validation_data=(X_test, Y_test),
-        callbacks=[checkpointer, csv_logger, reduce_lr, early_stop],
+        callbacks=[checkpointer, timeout_monitor, csv_logger, reduce_lr, early_stop],
     )
 
     print("Reloading saved best model")
