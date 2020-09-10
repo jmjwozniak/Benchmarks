@@ -279,20 +279,26 @@ class Struct:
 
 
 def run(params):
+    logger.info('UNO RUN() ...\n')
     args = Struct(**params)
     set_seed(args.rng_seed)
     ext = extension_from_parameters(args)
     verify_path(args.save_path)
     prefix = args.save_path + ext
-    logfile = args.logfile if args.logfile else prefix + '.log'
+    logfile = args.logfile if args.logfile else 'save/python.log'
     set_up_logger(logfile, args.verbose)
+    logger.info('UNO START\n')
     logger.info('Params: {}'.format(params))
 
     if (len(args.gpus) > 0):
+        logger.info('UNO: import tensorflow')
         import tensorflow as tf
+        logger.info('UNO: ConfigProto')
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
         config.gpu_options.visible_device_list = ",".join(map(str, args.gpus))
+        logger.info('UNO: ' + config.gpu_options.visible_device_list)
+        logger.info('UNO: set_session')
         K.set_session(tf.Session(config=config))
 
     loader = CombinedDataLoader(seed=args.rng_seed)
@@ -384,7 +390,7 @@ def run(params):
 
     if args.cp:
         model_json = model.to_json()
-        with open(prefix + '.model.json', 'w') as f:
+        with open('model.json', 'w') as f: # prefix +
             print(model_json, file=f)
 
     def warmup_scheduler(epoch):
@@ -433,7 +439,8 @@ def run(params):
 
         reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
         warmup_lr = LearningRateScheduler(warmup_scheduler)
-        checkpointer = MultiGPUCheckpoint(prefix + cv_ext + '.model.h5', save_best_only=True)
+        checkpointer = MultiGPUCheckpoint(checkpoint_file)
+        # , save_best_only=True) # prefix + cv_ext + '.model.h5'
         tensorboard = TensorBoard(log_dir="tb/{}{}{}".format(args.tb_prefix, ext, cv_ext))
         history_logger = LoggingCallback(logger.debug)
 
@@ -445,6 +452,7 @@ def run(params):
         if args.warmup_lr:
             callbacks.append(warmup_lr)
         if args.cp:
+            logger.info("Checkpointing to: " + checkpoint_file) # args.save_weights
             callbacks.append(checkpointer)
         if args.tb:
             callbacks.append(tensorboard)
