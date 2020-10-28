@@ -1033,7 +1033,7 @@ def get_subplan_features(plan_dict, subplan_id, parent_features=False):
     """Return train and validation features associated with a named subplan.
 
     Args
-        plan_dict:          The plan dictionary as returned by load_plan()x.
+        plan_dict:          The plan dictionary as returned by load_plan().
         subplan_id:         The name of the target subplan
         parent_features:    True or False
 
