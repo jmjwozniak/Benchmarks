@@ -40,7 +40,8 @@ def set_seed(seed):
 
     if K.backend() == 'tensorflow':
         import tensorflow as tf
-        tf.set_random_seed(seed)
+        # tf.set_random_seed(seed)
+        tf.compat.v1.random.set_random_seed(seed)
         candle.set_parallelism_threads()
 
 
