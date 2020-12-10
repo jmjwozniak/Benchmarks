@@ -1,13 +1,13 @@
 from __future__ import print_function
 
-import itertools
-import pandas as pd
+#import itertools
+#import pandas as pd
 import numpy as np
-import os
-import sys
-import gzip
-import argparse
-import sklearn
+#import os
+#import sys
+#import gzip
+#import argparse
+#import sklearn
 
 import matplotlib
 
@@ -17,13 +17,13 @@ import matplotlib.pyplot as plt
 
 import tensorflow as tf
 
-import keras as ke
+#import keras as ke
 from keras import backend as K
 
 from keras.layers import Input, Dense, Dropout, Activation, BatchNormalization
-from keras.optimizers import SGD, Adam, RMSprop, Adadelta
+#from keras.optimizers import SGD, Adam, RMSprop, Adadelta
 from keras.models import Sequential, Model, model_from_json, model_from_yaml
-from keras.utils import np_utils, multi_gpu_model
+#from keras.utils import np_utils, multi_gpu_model
 
 from keras.callbacks import (
     Callback,
@@ -38,21 +38,21 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     r2_score,
-    mean_squared_error,
-    mean_absolute_error,
+    #mean_squared_error,
+    #mean_absolute_error,
     roc_auc_score,
-    confusion_matrix,
-    balanced_accuracy_score,
-    classification_report,
+    #confusion_matrix,
+    #balanced_accuracy_score,
+    #classification_report,
 )
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, MaxAbsScaler
-from sklearn.metrics import (
-    recall_score,
-    auc,
-    roc_curve,
-    f1_score,
-    precision_recall_curve,
-)
+#from sklearn.metrics import (
+    #recall_score,
+    #auc,
+    #roc_curve,
+    #f1_score,
+    #precision_recall_curve,
+#)
 
 import adrp
 import candle
@@ -114,7 +114,9 @@ class MetricHistory(Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         y_pred = self.model.predict(self.validation_data[0])
-        r2 = r2_score(self.validation_data[1], y_pred)
+        y_true = self.validation_data[1]
+        sample_weight = self.validation_data[2]
+        r2 = r2_score(self.validation_data[1], y_pred, sample_weight=sample_weight)
         corr, _ = pearsonr(self.validation_data[1].flatten(), y_pred.flatten())
         print("\nval_r2:", r2)
         print(y_pred.shape)
@@ -211,11 +213,13 @@ def run(params):
     candle.set_seed(seed)
 
     # Construct extension to save model
-    ext = adrp.extension_from_parameters(params, ".keras")
-    params['save_path'] = './'+params['base_name']+'/'
-    candle.verify_path(params["save_path"])
-    prefix = "{}{}".format(params["save_path"], ext)
-    logfile = params["logfile"] if params["logfile"] else prefix + ".log"
+    # ext = adrp.extension_from_parameters(params, ".keras")
+    # params['save_path'] = './'+params['base_name']+'/'
+    # candle.verify_path(params["save_path"])
+
+    # prefix = "{}{}".format(params["save_path"], ext)
+    prefix = "{}".format(params["save_path"])
+    logfile = params["logfile"] if params["logfile"] else prefix + "TEST.log"
     candle.set_up_logger(logfile, adrp.logger, params["verbose"])
     adrp.logger.info("Params: {}".format(params))
 
@@ -223,13 +227,16 @@ def run(params):
     keras_defaults = candle.keras_default_config()
 
     ##
-    X_train, Y_train, X_test, Y_test, PS = adrp.load_data(params, seed)
+    X_train, Y_train, X_test, Y_test, PS, count_array = adrp.load_data(params, seed)
 
     print("X_train shape:", X_train.shape)
     print("X_test shape:", X_test.shape)
 
     print("Y_train shape:", Y_train.shape)
     print("Y_test shape:", Y_test.shape)
+
+    print("Y_test:")
+    print(Y_test)
 
     # Initialize weights and learning rule
     initializer_weights = candle.build_initializer(
@@ -248,7 +255,7 @@ def run(params):
 
     inputs = Input(shape=(PS,))
 
-    if dense_layers != None:
+    if dense_layers is not None:
         if type(dense_layers) != list:
             dense_layers = list(dense_layers)
         for i, l in enumerate(dense_layers):
@@ -304,11 +311,12 @@ def run(params):
         filepath=params["save_path"] + "agg_adrp.autosave.model.h5",
         verbose=1,
         save_weights_only=False,
-        save_best_only=True,
+        save_best_only=True
     )
     csv_logger = CSVLogger(params["save_path"] + "agg_adrp.training.log")
 
-    min_lr = params['learning_rate']*params['reduce_ratio']
+    #min_lr = params['learning_rate']*params['reduce_ratio']
+    min_lr=0.000000001
     reduce_lr = ReduceLROnPlateau(
         monitor="val_loss",
         factor=0.75,
@@ -320,23 +328,72 @@ def run(params):
         min_lr=min_lr
     )
 
-    early_stop = EarlyStopping(monitor="val_loss", 
+    early_stop = EarlyStopping(monitor="val_loss",
                                patience=params['early_patience'],
-                               verbose=1, 
+                               verbose=1,
                                mode="auto")
+
+    #count_array = np.random.random_integers(0, 10000, 20)
+    #print(count_array)
 
     # history = parallel_model.fit(X_train, Y_train,
     epochs = params["epochs"]
     batch_size = params["batch_size"]
     timeout_monitor = candle.TerminateOnTimeOut(params['timeout'])
-    
+    if (params['use_sample_weight']):
+        if (params['sample_weight_type'] == 'linear'):
+            train_weight = np.array(Y_train.values.tolist())
+            test_weight = np.array(Y_test.values.tolist())
+            print("Linear score weighting")
+        elif (params['sample_weight_type'] == 'quadratic'):
+            train_weight = np.square(np.array(Y_train.values.tolist()))
+            test_weight = np.square(np.array(Y_test.values.tolist()))
+            print("Quadratic score weighting")
+        elif (params['sample_weight_type'] == 'inverse_samples'):
+            train_score = np.array(Y_train.values.tolist())
+            test_score = np.array(Y_test.values.tolist())
+            train_bin = train_score.astype(int)
+            test_bin = test_score.astype(int)
+            train_count = count_array[train_bin].astype(float)
+            test_count = count_array[test_bin].astype(float)
+            train_weight = 1. / (train_count + 1.0)
+            test_weight = 1. / (test_count + 1.0)
+            print("Inverse sample weighting")
+            print("Test score, bin, count, weight:")
+            print(test_score[:10, ])
+            print(test_bin[:10, ])
+            print(test_count[:10, ])
+        elif (params['sample_weight_type'] == 'inverse_samples_sqrt'):
+            train_score = np.array(Y_train.values.tolist())
+            test_score = np.array(Y_test.values.tolist())
+            train_bin = train_score.astype(int)
+            test_bin = test_score.astype(int)
+            train_count = count_array[train_bin].astype(float)
+            test_count = count_array[test_bin].astype(float)
+            train_weight = 1. / np.sqrt(train_count + 1.0)
+            test_weight = 1. / np.sqrt(test_count + 1.0)
+            print("Inverse sqrt sample weighting")
+            print("Test score, bin, count, weight:")
+            print(test_score[:10, ])
+            print(test_bin[:10, ])
+            print(test_count[:10, ])
+
+    else:
+        train_weight = np.ones(shape=(len(Y_train),))
+        test_weight = np.ones(shape=(len(Y_test),))
+
+    print("Test weight:")
+    print(test_weight[:10, ])
+
+    print("calling model.fit with epochs={}".format(epochs))    
     history = model.fit(
         X_train,
         Y_train,
         batch_size=batch_size,
         epochs=epochs,
         verbose=1,
-        validation_data=(X_test, Y_test),
+        sample_weight=train_weight,
+        validation_data=(X_test, Y_test, test_weight),
         callbacks=[checkpointer, timeout_monitor, csv_logger, reduce_lr, early_stop],
     )
 
@@ -351,7 +408,7 @@ def run(params):
 
     # see big fuction below, creates plots etc.
     # TODO: Break post_process into multiple functions
-    post_process(params, X_train, X_test, Y_test, score, history, model)
+    # post_process(params, X_train, X_test, Y_test, score, history, model)
 
     adrp.logger.handlers = []
 

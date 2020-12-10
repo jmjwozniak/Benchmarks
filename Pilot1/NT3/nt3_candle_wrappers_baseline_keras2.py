@@ -16,36 +16,22 @@ from keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau
 
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, MaxAbsScaler
-from abstain_functions import print_abs_stats, write_abs_stats, abs_definitions, adjust_alpha
 
 import nt3 as bmk
 import candle
 
-additional_definitions = abs_definitions
 
-required = bmk.required
+def initialize_parameters(default_model='nt3_default_model.txt'):
 
-class BenchmarkNT3Abs(candle.Benchmark):
-    def set_locals(self):
-        """Functionality to set variables specific for the benchmark
-        - required: set of required parameters for the benchmark.
-        - additional_definitions: list of dictionaries describing the additional parameters for the
-        benchmark.
-        """
-
-        if required is not None:
-            self.required = set(bmk.required)
-        if additional_definitions is not None:
-            self.additional_definitions = abs_definitions + bmk.additional_definitions
-
-def initialize_parameters(default_model='nt3_noise_model.txt'):
+    import os # ADD THIS LINE
 
     # Build benchmark object
-    nt3Bmk = BenchmarkNT3Abs(
+    nt3Bmk = bmk.BenchmarkNT3(
         bmk.file_path,
-        default_model,
+        # default_model, # ORIGINAL LINE
+        os.getenv('CANDLE_DEFAULT_MODEL_FILE'), # NEW LINE
         'keras',
-        prog='nt3_abstention',
+        prog='nt3_baseline',
         desc='1D CNN to classify RNA sequence data in normal or tumor classes')
 
     # Initialize parameters
@@ -72,8 +58,6 @@ def load_data(train_path, test_path, gParameters):
     # only training set has noise
     Y_train = np_utils.to_categorical(df_y_train, gParameters['classes'])
     Y_test = np_utils.to_categorical(df_y_test, gParameters['classes'])
-#    Y_train, y_train_noise_gen = candle.label_flip(df_y_train, gParameters['label_noise'])
-#    Y_test, y_test_noise_gen = candle.label_flip(df_y_test, gParameters['label_noise'])
 
     df_x_train = df_train[:, 1:seqlen].astype(np.float32)
     df_x_test = df_test[:, 1:seqlen].astype(np.float32)
@@ -88,22 +72,22 @@ def load_data(train_path, test_path, gParameters):
     X_train = mat[:X_train.shape[0], :]
     X_test = mat[X_train.shape[0]:, :]
 
-    # check if noise is on
+    # TODO: Add better names for noise boolean, make a featue for both RNA seq and label noise together
+    # check if noise is on (this is for label)
     if gParameters['add_noise']:
         # check if we want noise correlated with a feature
-        if gParameters['noise_correlated']: 
-            Y_train, y_train_noise_gen = candle.label_flip_correlated(Y_train, 
-                                                              gParameters['label_noise'], X_train,
-                                                              gParameters['feature_col'],
-                                                              gParameters['feature_threshold'])
+        if gParameters['noise_correlated']:
+            Y_train, y_train_noise_gen = candle.label_flip_correlated(Y_train,
+                                                                      gParameters['label_noise'], X_train,
+                                                                      gParameters['feature_col'],
+                                                                      gParameters['feature_threshold'])
         # else add uncorrelated noise
         else:
             Y_train, y_train_noise_gen = candle.label_flip(Y_train, gParameters['label_noise'])
     # check if noise is on for RNA-seq data
     elif gParameters['noise_gaussian']:
-        print("adding gnoise", gParameters['std_dev'])
         X_train = candle.add_gaussian_noise(X_train, 0, gParameters['std_dev'])
-
+	    
     return X_train, Y_train, X_test, Y_test
 
 
@@ -119,13 +103,6 @@ def run(gParameters):
     test_file = candle.get_file(file_test, url + file_test, cache_subdir='Pilot1')
 
     X_train, Y_train, X_test, Y_test = load_data(train_file, test_file, gParameters)
-
-    # add extra class for abstention
-    # first reverse the to_categorical
-    Y_train = np.argmax(Y_train, axis=1)
-    Y_test = np.argmax(Y_test, axis=1)
-    Y_train, Y_test = candle.modify_labels(gParameters['classes']+1, Y_train, Y_test)
-    #print(Y_test)
 
     print('X_train shape:', X_train.shape)
     print('X_test shape:', X_test.shape)
@@ -143,6 +120,32 @@ def run(gParameters):
     print('X_train shape:', X_train.shape)
     print('X_test shape:', X_test.shape)
 
+    # Have to add this line or else ALW on 2020-11-15 finds Supervisor jobs using canonically CANDLE-compliant model scripts die as soon as a particular task is used a second time:
+    # EXCEPTION:
+    # InvalidArgumentError() ...
+    # File "<string>", line 23, in <module>
+    # File "/gpfs/alpine/med106/world-shared/candle/2020-11-11/checkouts/Supervisor/workflows/common/python/model_runner.py", line 241, in run_model
+    #     result, history = run(hyper_parameter_map, obj_return)
+    # File "/gpfs/alpine/med106/world-shared/candle/2020-11-11/checkouts/Supervisor/workflows/common/python/model_runner.py", line 169, in run
+    #     history = pkg.run(params)
+    # File "/gpfs/alpine/med106/world-shared/candle/2020-11-11/checkouts/Benchmarks/Pilot1/NT3/nt3_candle_wrappers_baseline_keras2.py", line 211, in run
+    #     callbacks=[csv_logger, reduce_lr, candleRemoteMonitor, timeoutMonitor])
+    # File "/gpfs/alpine/world-shared/med106/sw/condaenv-200408/lib/python3.6/site-packages/keras/engine/training.py", line 1178, in fit
+    #     validation_freq=validation_freq)
+    # File "/gpfs/alpine/world-shared/med106/sw/condaenv-200408/lib/python3.6/site-packages/keras/engine/training_arrays.py", line 204, in fit_loop
+    #     outs = fit_function(ins_batch)
+    # File "/gpfs/alpine/world-shared/med106/sw/condaenv-200408/lib/python3.6/site-packages/keras/backend/tensorflow_backend.py", line 2979, in __call__
+    #     return self._call(inputs)
+    # File "/gpfs/alpine/world-shared/med106/sw/condaenv-200408/lib/python3.6/site-packages/keras/backend/tensorflow_backend.py", line 2933, in _call
+    #     session)
+    # File "/gpfs/alpine/world-shared/med106/sw/condaenv-200408/lib/python3.6/site-packages/keras/backend/tensorflow_backend.py", line 2885, in _make_callable
+    #     callable_fn = session._make_callable_from_options(callable_opts)
+    # File "/gpfs/alpine/world-shared/med106/sw/condaenv-200408/lib/python3.6/site-packages/tensorflow_core/python/client/session.py", line 1505, in _make_callable_from_options
+    #     return BaseSession._Callable(self, callable_options)
+    # File "/gpfs/alpine/world-shared/med106/sw/condaenv-200408/lib/python3.6/site-packages/tensorflow_core/python/client/session.py", line 1460, in __init__
+    #     session._session, options_ptr)
+    K.clear_session()
+    
     model = Sequential()
 
     layer_list = list(range(0, len(gParameters['conv']), 3))
@@ -181,9 +184,6 @@ def run(gParameters):
     model.add(Dense(gParameters['classes']))
     model.add(Activation(gParameters['out_activation']))
 
-    # modify the model for abstention
-    model = candle.add_model_output(model, mode='abstain', num_add=1, activation=gParameters['out_activation'])
-
 # Reference case
 # model.add(Conv1D(filters=128, kernel_size=20, strides=1, padding='valid', input_shape=(P, 1)))
 # model.add(Activation('relu'))
@@ -209,52 +209,9 @@ def run(gParameters):
                                        kerasDefaults)
 
     model.summary()
-
-    # Configure abstention model
-    nb_classes = gParameters['classes']
-    mask = np.zeros(nb_classes + 1)
-    mask[nb_classes] = 1.0
-    print("Mask is ", mask)
-    alpha0 = gParameters['alpha']
-    if isinstance(gParameters['max_abs'], list):
-        max_abs = gParameters['max_abs'][0]
-    else:
-        max_abs = gParameters['max_abs']
-
-    print("Initializing abstention callback with: \n")
-    print("alpha0 ", alpha0)
-    print("alpha_scale_factor ", gParameters['alpha_scale_factor'])
-    print("min_abs_acc ", gParameters['min_acc'])
-    print("max_abs_frac ", max_abs)
-    print("acc_gain ", gParameters['acc_gain'])
-    print("abs_gain ", gParameters['abs_gain'])
-
-    abstention_cbk = candle.AbstentionAdapt_Callback(acc_monitor='val_abstention_acc',
-                                                     abs_monitor='val_abstention',
-                                                     init_abs_epoch=gParameters['init_abs_epoch'],
-                                                     alpha0=alpha0,
-                                                     alpha_scale_factor=gParameters['alpha_scale_factor'],
-                                                     min_abs_acc=gParameters['min_acc'],
-                                                     max_abs_frac=max_abs,
-                                                     acc_gain=gParameters['acc_gain'],
-                                                     abs_gain=gParameters['abs_gain'])
-
-    model.compile(loss=candle.abstention_loss(abstention_cbk.alpha, mask),
+    model.compile(loss=gParameters['loss'],
                   optimizer=optimizer,
-                  metrics=[# gParameters['metrics'], 
-                           candle.abstention_acc_metric(nb_classes),
-                           #candle.acc_class_i_metric(1), 
-                           #candle.abstention_acc_class_i_metric(nb_classes, 1),
-                           candle.abstention_metric(nb_classes)])
-
-
-    #model.compile(loss=abs_loss,
-    #              optimizer=optimizer,
-    #              metrics=abs_acc)
-
-    #model.compile(loss=gParameters['loss'],
-    #              optimizer=optimizer,
-    #              metrics=[gParameters['metrics']])
+                  metrics=[gParameters['metrics']])
 
     output_dir = gParameters['output_dir']
 
@@ -269,36 +226,17 @@ def run(gParameters):
     path = '{}/{}.autosave.model.h5'.format(output_dir, model_name)
     # checkpointer = ModelCheckpoint(filepath=path, verbose=1, save_weights_only=False, save_best_only=True)
     csv_logger = CSVLogger('{}/training.log'.format(output_dir))
-    reduce_lr = ReduceLROnPlateau(monitor='abs_crossentropy', 
-                                  factor=0.1, patience=10, verbose=1, mode='auto', 
-                                  epsilon=0.0001, cooldown=0, min_lr=0)
-
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=10, verbose=1, mode='auto', epsilon=0.0001, cooldown=0, min_lr=0)
     candleRemoteMonitor = candle.CandleRemoteMonitor(params=gParameters)
     timeoutMonitor = candle.TerminateOnTimeOut(gParameters['timeout'])
-
-    n_iters = 1
-
-    val_labels ={"activation_5":Y_test}
-    #for epoch in range(gParameters['epochs']):
-    #    print('Iteration = ', epoch)
     history = model.fit(X_train, Y_train,
                         batch_size=gParameters['batch_size'],
                         epochs=gParameters['epochs'],
-                        #initial_epoch=epoch,
-                        #epochs=epoch + n_iters,
                         verbose=1,
                         validation_data=(X_test, Y_test),
-                        #callbacks=[csv_logger, reduce_lr, candleRemoteMonitor, timeoutMonitor]) # , abstention_cbk])
-                        callbacks=[csv_logger, reduce_lr, candleRemoteMonitor, timeoutMonitor, abstention_cbk])
-
-    #    ret, alpha = adjust_alpha(gParameters, X_test, Y_test, val_labels, model, alpha, [nb_classes+1])
+                        callbacks=[csv_logger, reduce_lr, candleRemoteMonitor, timeoutMonitor])
 
     score = model.evaluate(X_test, Y_test, verbose=0)
-
-    alpha_trace = open(output_dir+"/alpha_trace","w+")
-    for alpha in abstention_cbk.alphavalues:
-        alpha_trace.write(str(alpha)+'\n')
-    alpha_trace.close()
 
     if False:
         print('Test score:', score[0])

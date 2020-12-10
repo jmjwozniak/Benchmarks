@@ -4,20 +4,19 @@ from __future__ import division, print_function
 
 import logging
 import os
-import os.path
-from os import path
 import random
-import time
 
 import numpy as np
 import pandas as pd
 
-import keras
-from keras import backend as K
-from keras import optimizers
-from keras.models import Model
-from keras.layers import Input, Dense, Dropout
-from keras.callbacks import Callback, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler, TensorBoard
+import keras as krs # need for candle package load
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.python.keras import backend as K
+from tensorflow.keras import optimizers
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, Dropout
+from tensorflow.keras.callbacks import Callback, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler, TensorBoard
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from scipy.stats.stats import pearsonr
 
@@ -27,6 +26,11 @@ import candle
 import uno_data
 from uno_data import CombinedDataLoader, CombinedDataGenerator, DataFeeder
 
+from uno_baseline_keras2 import verify_path, set_up_logger, extension_from_parameters, discretize, r2, mae, evaluate_prediction, log_evaluation
+from uno_baseline_keras2 import build_feature_model, build_model, initialize_parameters
+from uno_baseline_keras2 import LoggingCallback, PermanentDropout, MultiGPUCheckpoint, SimpleWeightSaver
+
+tf.compat.v1.disable_eager_execution()
 
 logger = logging.getLogger(__name__)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -40,307 +44,26 @@ def set_seed(seed):
 
     if K.backend() == 'tensorflow':
         import tensorflow as tf
-        #tf.set_random_seed(seed)
-        tf.compat.v1.random.set_random_seed(seed) # ALW changed to this on 9/30/20, otherwise this dies if using modern TensorFlow
+        tf.random.set_seed(seed)
         candle.set_parallelism_threads()
 
 
-def verify_path(path):
-    folder = os.path.dirname(path)
-    if folder and not os.path.exists(folder):
-        os.makedirs(folder)
-
-
-def set_up_logger(logfile, verbose):
-    verify_path(logfile)
-    if os.path.exists(logfile):
-        with open(logfile, "a") as fp:
-            fp.write("\n\n")
-    fh = logging.FileHandler(logfile)
-    fh.setFormatter(logging.Formatter("%(asctime)s %(message)s",
-                                      datefmt="%Y-%m-%d %H:%M:%S"))
-    fh.setLevel(logging.DEBUG)
-
-    sh = logging.StreamHandler()
-    sh.setFormatter(logging.Formatter(''))
-    sh.setLevel(logging.DEBUG if verbose else logging.INFO)
-
-    for log in [logger, uno_data.logger]:
-        log.setLevel(logging.DEBUG)
-        log.addHandler(fh)
-        log.addHandler(sh)
-
-
-def extension_from_parameters(args):
-    """Construct string for saving model with annotation of parameters"""
-    ext = ''
-    ext += '.A={}'.format(args.activation)
-    ext += '.B={}'.format(args.batch_size)
-    ext += '.E={}'.format(args.epochs)
-    ext += '.O={}'.format(args.optimizer)
-    # ext += '.LEN={}'.format(args.maxlen)
-    ext += '.LR={}'.format(args.learning_rate)
-    ext += '.CF={}'.format(''.join([x[0] for x in sorted(args.cell_features)]))
-    ext += '.DF={}'.format(''.join([x[0] for x in sorted(args.drug_features)]))
-    if args.feature_subsample > 0:
-        ext += '.FS={}'.format(args.feature_subsample)
-    if args.dropout > 0:
-        ext += '.DR={}'.format(args.dropout)
-    if args.warmup_lr:
-        ext += '.wu_lr'
-    if args.reduce_lr:
-        ext += '.re_lr'
-    if args.residual:
-        ext += '.res'
-    if args.use_landmark_genes:
-        ext += '.L1000'
-    if args.no_gen:
-        ext += '.ng'
-    for i, n in enumerate(args.dense):
-        if n > 0:
-            ext += '.D{}={}'.format(i + 1, n)
-    if args.dense_feature_layers != args.dense:
-        for i, n in enumerate(args.dense):
-            if n > 0:
-                ext += '.FD{}={}'.format(i + 1, n)
-
-    return ext
-
-
-def discretize(y, bins=5):
-    percentiles = [100 / bins * (i + 1) for i in range(bins - 1)]
-    thresholds = [np.percentile(y, x) for x in percentiles]
-    classes = np.digitize(y, thresholds)
-    return classes
-
-
-def r2(y_true, y_pred):
-    SS_res = K.sum(K.square(y_true - y_pred))
-    SS_tot = K.sum(K.square(y_true - K.mean(y_true)))
-    return (1 - SS_res / (SS_tot + K.epsilon()))
-
-
-def mae(y_true, y_pred):
-    return keras.metrics.mean_absolute_error(y_true, y_pred)
-
-
-def evaluate_prediction(y_true, y_pred):
-    mse = mean_squared_error(y_true, y_pred)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    corr, _ = pearsonr(y_true, y_pred)
-    return {'mse': mse, 'mae': mae, 'r2': r2, 'corr': corr}
-
-
-def log_evaluation(metric_outputs, description='Comparing y_true and y_pred:'):
-    logger.info(description)
-    for metric, value in metric_outputs.items():
-        logger.info('  {}: {:.6f}'.format(metric, value))
-
-
-class LoggingCallback(Callback):
-    def __init__(self, print_fcn=print):
-        Callback.__init__(self)
-        self.print_fcn = print_fcn
-
-    def on_epoch_end(self, epoch, logs={}):
-        msg = "[Epoch: %i] %s" % (epoch, ", ".join("%s: %f" % (k, v) for k, v in sorted(logs.items())))
-        self.print_fcn(msg)
-
-
-class PermanentDropout(Dropout):
-    def __init__(self, rate, **kwargs):
-        super(PermanentDropout, self).__init__(rate, **kwargs)
-        self.uses_learning_phase = False
-
-    def call(self, x, mask=None):
-        if 0. < self.rate < 1.:
-            noise_shape = self._get_noise_shape(x)
-            x = K.dropout(x, self.rate, noise_shape)
-        return x
-
-
-class MultiGPUCheckpoint(ModelCheckpoint):
-
-    def set_model(self, model):
-        if isinstance(model.layers[-2], Model):
-            self.model = model.layers[-2]
-        else:
-            self.model = model
-
-
-def build_feature_model(input_shape, name='', dense_layers=[1000, 1000],
-                        activation='relu', residual=False,
-                        dropout_rate=0, permanent_dropout=True):
-    x_input = Input(shape=input_shape)
-    h = x_input
-    for i, layer in enumerate(dense_layers):
-        x = h
-        h = Dense(layer, activation=activation)(h)
-        if dropout_rate > 0:
-            if permanent_dropout:
-                h = PermanentDropout(dropout_rate)(h)
-            else:
-                h = Dropout(dropout_rate)(h)
-        if residual:
-            try:
-                h = keras.layers.add([h, x])
-            except ValueError:
-                pass
-    model = Model(x_input, h, name=name)
-    return model
-
-
-class SimpleWeightSaver(Callback):
-
-    def __init__(self, fname):
-        self.fname = fname
-
-    def set_model(self, model):
-        if isinstance(model.layers[-2], Model):
-            self.model = model.layers[-2]
-        else:
-            self.model = model
-
-    def on_train_end(self, logs={}):
-        self.model.save_weights(self.fname)
-
-
-def build_model(loader, args, permanent_dropout=True, silent=False):
-    input_models = {}
-    dropout_rate = args.dropout
-    for fea_type, shape in loader.feature_shapes.items():
-        base_type = fea_type.split('.')[0]
-        if base_type in ['cell', 'drug']:
-            if args.dense_cell_feature_layers is not None and base_type == 'cell':
-                dense_feature_layers = args.dense_cell_feature_layers
-            elif args.dense_drug_feature_layers is not None and base_type == 'drug':
-                dense_feature_layers = args.dense_drug_feature_layers
-            else:
-                dense_feature_layers = args.dense_feature_layers
-
-            box = build_feature_model(input_shape=shape, name=fea_type,
-                                      dense_layers=dense_feature_layers,
-                                      dropout_rate=dropout_rate, permanent_dropout=permanent_dropout)
-            if not silent:
-                logger.debug('Feature encoding submodel for %s:', fea_type)
-                box.summary(print_fn=logger.debug)
-            input_models[fea_type] = box
-
-    inputs = []
-    encoded_inputs = []
-    for fea_name, fea_type in loader.input_features.items():
-        shape = loader.feature_shapes[fea_type]
-        fea_input = Input(shape, name='input.' + fea_name)
-        inputs.append(fea_input)
-        if fea_type in input_models:
-            input_model = input_models[fea_type]
-            encoded = input_model(fea_input)
-        else:
-            encoded = fea_input
-        encoded_inputs.append(encoded)
-
-    merged = keras.layers.concatenate(encoded_inputs)
-
-    h = merged
-    for i, layer in enumerate(args.dense):
-        x = h
-        h = Dense(layer, activation=args.activation)(h)
-        if dropout_rate > 0:
-            if permanent_dropout:
-                h = PermanentDropout(dropout_rate)(h)
-            else:
-                h = Dropout(dropout_rate)(h)
-        if args.residual:
-            try:
-                h = keras.layers.add([h, x])
-            except ValueError:
-                pass
-    output = Dense(1)(h)
-
-    return Model(inputs, output)
-
-
-def initialize_parameters(default_model='uno_default_model.txt'):
-
-    # Build benchmark object
-    unoBmk = benchmark.BenchmarkUno(benchmark.file_path, default_model, 'keras',
-                                    prog='uno_baseline', desc='Build neural network based models to predict tumor response to single and paired drugs.')
-
-    # Initialize parameters
-    gParameters = candle.finalize_parameters(unoBmk)
-    # benchmark.logger.info('Params: {}'.format(gParameters))
-
-    return gParameters
-
-
-<<<<<<< HEAD
-class Struct:
-    def __init__(self, **entries):
-        self.__dict__.update(entries)
-
-
-def get_last_epoch(log):
-    """ Return the last completed epoch in the log as an integer """
-    import re
-    last_epoch = -1
-    logger.info("get_last_epoch(): open: " + log)
-    pattern = re.compile(".* \[Epoch: ([0-9].*)\] loss:")
-    with open(log) as fp:
-        for line in fp.readlines():
-            m = re.match(pattern, line)
-            if m != None:
-                logger.info("get_last_epoch(): line: " + line)
-                # print(line)
-                s = m.group(1) # the Epoch integer as a  string
-                e = int(s)     # the Epoch integer as an int
-                if e > last_epoch:
-                    last_epoch = e
-    logger.info("get_last_epoch(): result: %i", last_epoch)
-    return last_epoch
-
-
-def run(params):
-    logger.info('UNO RUN() ...\n')
-    args = Struct(**params)
-=======
 def run(params):
     args = candle.ArgumentStruct(**params)
->>>>>>> 95abc8658d99d9642a0332fc8f1aefb7ff1d28f5
     set_seed(args.rng_seed)
     ext = extension_from_parameters(args)
     verify_path(args.save_path)
     prefix = args.save_path + ext
-    logfile = args.logfile if args.logfile else 'save/python.log'
+    logfile = args.logfile if args.logfile else prefix + '.log'
     set_up_logger(logfile, args.verbose)
-    logger.info('UNO START\n')
     logger.info('Params: {}'.format(params))
 
-    initial_epoch = get_last_epoch(logfile) + 1 # start at next epoch
-    logger.info('initial_epoch: ' + str(initial_epoch))
-    if initial_epoch >= int(args.epochs):
-        logger.warning("EPOCHS COMPLETED IN LOG!")
-
     if (len(args.gpus) > 0):
-        logger.info('UNO: import tensorflow')
         import tensorflow as tf
-<<<<<<< HEAD
-        logger.info('UNO: ConfigProto')
-        config = tf.ConfigProto()
+        config = tf.compat.v1.ConfigProto()
         config.gpu_options.allow_growth = True
         config.gpu_options.visible_device_list = ",".join(map(str, args.gpus))
-        logger.info('UNO: ' + config.gpu_options.visible_device_list)
-        logger.info('UNO: set_session')
-        K.set_session(tf.Session(config=config))
-=======
-        #config = tf.ConfigProto()
-        config = tf.compat.v1.ConfigProto() # ALW changed to this on 9/30/20, otherwise this dies if using modern TensorFlow
-        #config = tf.compat.v1.ConfigProto(log_device_placement=True) # ALW
-        config.gpu_options.allow_growth = True
-        config.gpu_options.visible_device_list = ",".join(map(str, args.gpus))
-        #K.set_session(tf.Session(config=config))
-        tf.compat.v1.keras.backend.set_session(tf.compat.v1.Session(config=config)) # ALW changed to this on 9/30/20, otherwise this dies if using modern TensorFlow
->>>>>>> 95abc8658d99d9642a0332fc8f1aefb7ff1d28f5
+        K.set_session(tf.compat.v1.Session(config=config))
 
     loader = CombinedDataLoader(seed=args.rng_seed)
     loader.load(cache=args.cache,
@@ -431,7 +154,7 @@ def run(params):
 
     if args.cp:
         model_json = model.to_json()
-        with open('model.json', 'w') as f: # prefix +
+        with open(prefix + '.model.json', 'w') as f:
             print(model_json, file=f)
 
     def warmup_scheduler(epoch):
@@ -452,16 +175,7 @@ def run(params):
             cv_ext = '.cv{}'.format(fold + 1)
 
         template_model = build_model(loader, args, silent=True)
-        checkpoint_file = 'save/model-ckpt.h5'
-        logger.info("Checkpoint file: " + checkpoint_file)
-        if path.isfile(checkpoint_file):
-            logger.info("Loading from checkpoint_file ...")
-            start = time.time()
-            template_model.load_weights(checkpoint_file)
-            stop = time.time()
-            duration = stop - start
-            logger.info("Loaded from checkpoint_file in %0.3f seconds." % duration)
-        elif args.initial_weights:
+        if args.initial_weights:
             logger.info("Loading initial weights from {}".format(args.initial_weights))
             template_model.load_weights(args.initial_weights)
 
@@ -489,8 +203,7 @@ def run(params):
 
         reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
         warmup_lr = LearningRateScheduler(warmup_scheduler)
-        checkpointer = MultiGPUCheckpoint(checkpoint_file)
-        # , save_best_only=True) # prefix + cv_ext + '.model.h5'
+        checkpointer = MultiGPUCheckpoint(prefix + cv_ext + '.model.h5', save_best_only=True)
         tensorboard = TensorBoard(log_dir="tb/{}{}{}".format(args.tb_prefix, ext, cv_ext))
         history_logger = LoggingCallback(logger.debug)
 
@@ -502,7 +215,6 @@ def run(params):
         if args.warmup_lr:
             callbacks.append(warmup_lr)
         if args.cp:
-            logger.info("Checkpointing to: " + checkpoint_file) # args.save_weights
             callbacks.append(checkpointer)
         if args.tb:
             callbacks.append(tensorboard)
@@ -512,7 +224,7 @@ def run(params):
 
         if args.use_exported_data is not None:
             train_gen = DataFeeder(filename=args.use_exported_data, batch_size=args.batch_size, shuffle=args.shuffle, single=args.single, agg_dose=args.agg_dose, on_memory=args.on_memory_loader)
-            val_gen = DataFeeder(partition='val', filename=args.use_exported_data, batch_size=args.batch_size, shuffle=args.shuffle, single=args.single, agg_dose=args.agg_dose,  on_memory=args.on_memory_loader)
+            val_gen = DataFeeder(partition='val', filename=args.use_exported_data, batch_size=args.batch_size, shuffle=args.shuffle, single=args.single, agg_dose=args.agg_dose, on_memory=args.on_memory_loader)
             test_gen = DataFeeder(partition='test', filename=args.use_exported_data, batch_size=args.batch_size, shuffle=args.shuffle, single=args.single, agg_dose=args.agg_dose, on_memory=args.on_memory_loader)
         else:
             train_gen = CombinedDataGenerator(loader, fold=fold, batch_size=args.batch_size, shuffle=args.shuffle, single=args.single)
@@ -538,7 +250,6 @@ def run(params):
             logger.info('Steps per epoch: train = %d, val = %d, test = %d', train_gen.steps, val_gen.steps, test_gen.steps)
             history = model.fit_generator(train_gen, train_gen.steps,
                                           epochs=args.epochs,
-                                          initial_epoch=initial_epoch,
                                           callbacks=callbacks,
                                           validation_data=val_gen,
                                           validation_steps=val_gen.steps)
@@ -567,15 +278,7 @@ def run(params):
         df_val[target + 'Error'] = y_val_pred - y_val
         df_pred_list.append(df_val)
 
-<<<<<<< HEAD
-        candle.plot_metrics(history, title=None, skip_ep=0, outdir='./save/', add_lr=True)
-        train_gen.close()
-        test_gen.close()
-        val_gen.close()
-        # End of cross-validation loop.
-=======
-        candle.plot_metrics(history, title=None, skip_ep=0, outdir=args.output_dir, add_lr=True)
->>>>>>> 95abc8658d99d9642a0332fc8f1aefb7ff1d28f5
+        candle.plot_metrics(history, title=None, skip_ep=0, outdir=os.path.dirname(args.save_path), add_lr=True)
 
     pred_fname = prefix + '.predicted.tsv'
     df_pred = pd.concat(df_pred_list)
